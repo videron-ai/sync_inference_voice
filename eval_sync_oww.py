@@ -255,13 +255,13 @@ def _voice_process_main(
     # --- Load openwakeword ---
     proc_logger.info(f"[VOICE] Loading openwakeword model: '{wakeword_model}'")
     try:
-        #import openwakeword
-        #import os
-        jarvis_model_path = "/usr/local/lib/python3.12/dist-packages/openwakeword/resources/models/hey_jarvis_v0.1.onnx"
-
-        #from openwakeword.model import Model as OWWModel
-        oww_model = OWWModel(wakeword_model_paths=[jarvis_model_path])
-        
+        import os
+        if os.path.isfile(wakeword_model):
+            # Custom ONNX/TFLite file path provided
+            oww_model = OWWModel(wakeword_model_paths=[wakeword_model])
+        else:
+            # Pre-trained model name (e.g. "hey_jarvis", "alexa")
+            oww_model = OWWModel(wakeword_models=[wakeword_model])
     except Exception as exc:
         proc_logger.error(f"[VOICE] Failed to load openwakeword model: {exc}")
         return
@@ -288,9 +288,15 @@ def _voice_process_main(
     if mic_device_name:
         device_index = _find_device_index(pa, mic_device_name)
         if device_index is None:
+            available_devices = [
+                pa.get_device_info_by_index(i)["name"]
+                for i in range(pa.get_device_count())
+                if pa.get_device_info_by_index(i)["maxInputChannels"] > 0
+            ]
             proc_logger.warning(
                 f"[VOICE] Could not find input device matching '{mic_device_name}'. "
-                "Falling back to system default microphone."
+                f"Falling back to system default microphone. "
+                f"Available input devices: {available_devices}"
             )
         else:
             proc_logger.info(f"[VOICE] Using input device index {device_index} ('{mic_device_name}')")
@@ -350,6 +356,7 @@ def _voice_process_main(
             # --- Transcribe with faster-whisper ---
             # Convert int16 PCM → float32 normalised to [-1, 1]
             audio_f32 = command_audio.astype(np.float32) / 32768.0
+            audio_f32 = np.clip(audio_f32, -1.0, 1.0)
 
             try:
                 segments, info = stt_model.transcribe(
@@ -569,11 +576,15 @@ def main(cfg: SyncOWWConfig):
             current_task = check_for_input(current_task)
 
             # Drain voice task queue — keep only the most recent command
+            voice_task = None
             try:
                 while True:
-                    current_task = task_queue.get_nowait()
+                    voice_task = task_queue.get_nowait()
             except queue.Empty:
                 pass
+            if voice_task is not None:
+                current_task = voice_task
+                logger.info(f"[MAIN] Voice task applied: '{current_task}'")
 
             active_task = current_task
 
@@ -629,6 +640,7 @@ def main(cfg: SyncOWWConfig):
         voice_proc.join(timeout=5)
         if voice_proc.is_alive():
             voice_proc.terminate()
+            voice_proc.join(timeout=3)
         robot.disconnect()
         logger.info(f"Robot disconnected — total steps: {step}")
 
